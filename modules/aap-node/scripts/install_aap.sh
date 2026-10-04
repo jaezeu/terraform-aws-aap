@@ -37,7 +37,7 @@ RH_SSO_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-c
 RH_API_URL="https://api.access.redhat.com/management/v1"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
-die() { log "ERROR: $*"; exit 1; }
+die() { log "ERROR: $*"; set_status failed; exit 1; }
 
 # retry <attempts> <command...>  (logs only the command name: arguments may hold tokens)
 retry() {
@@ -113,6 +113,24 @@ IMDS_TOKEN=$(curl -sf --max-time 5 -X PUT "http://169.254.169.254/latest/api/tok
   -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 INSTANCE_ID=$(imds instance-id)
 PRIVATE_IP=$(imds local-ipv4)
+
+# The role and its policies are created seconds before the instance launches
+# and IAM is eventually consistent, so the first calls can still be denied.
+log "waiting for the instance role to be usable"
+ROLE_READY=false
+ROLE_ERR=""
+for _ in $(seq 1 60); do
+  if ROLE_ERR=$(aws ssm get-parameter --region "${AWS_REGION}" --name "${STATUS_PARAM}" \
+    --query 'Parameter.Name' --output text 2>&1 >/dev/null); then
+    ROLE_READY=true
+    break
+  fi
+  sleep 5
+done
+if [ "${ROLE_READY}" != "true" ]; then
+  die "instance role cannot read ${STATUS_PARAM} after 5 minutes: ${ROLE_ERR}"
+fi
+
 set_status installing
 log "instance=${INSTANCE_ID} private_ip=${PRIVATE_IP} hostname=${AAP_HOSTNAME}"
 
@@ -142,9 +160,18 @@ rm -f /etc/hosts.aap
 # -----------------------------------------------------------------------------
 # 4. Secrets from SSM Parameter Store (SecureString, decrypted with the role)
 # -----------------------------------------------------------------------------
+# Prints the value, or nothing after 5 failed attempts (the checks below then
+# fail with a clear message). The CLI error goes to the log, not the value.
 get_param() {
-  aws ssm get-parameter --region "${AWS_REGION}" --name "${SSM_PREFIX}/$1" \
-    --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true
+  local n
+  for n in 1 2 3 4 5; do
+    if aws ssm get-parameter --region "${AWS_REGION}" --name "${SSM_PREFIX}/$1" \
+      --with-decryption --query 'Parameter.Value' --output text; then
+      return 0
+    fi
+    sleep $((n * 5))
+  done
+  return 0
 }
 ADMIN_PASSWORD=$(get_param admin_password)
 PG_PASSWORD=$(get_param pg_password)
@@ -206,9 +233,20 @@ elif [ -n "${RH_OFFLINE_TOKEN}" ]; then
     die "no installer matching ${PREFIX}* in ${CSET}. Available: $(jq -r '[.body[]?.filename] | join(", ")' <<<"${IMAGES}")"
   fi
   FILENAME=$(jq -r '.filename' <<<"${IMAGE_JSON}")
-  HREF=$(jq -r '.downloadHref' <<<"${IMAGE_JSON}")
+  CHECKSUM=$(jq -r '.checksum' <<<"${IMAGE_JSON}")
   log "downloading ${FILENAME}"
-  retry 3 curl -fL --retry 3 -H "Authorization: Bearer ${RH_TOKEN}" -o "${TARBALL}" "${HREF}"
+  # Any account can list the content set; the download itself is entitlement-checked.
+  HTTP_CODE=$(curl -sSL --retry 3 -H "Authorization: Bearer ${RH_TOKEN}" -o "${TARBALL}" -w '%{http_code}' \
+    "${RH_API_URL}/images/${CHECKSUM}/download" || true)
+  if [ "${HTTP_CODE}" = "403" ]; then
+    die "Red Hat refused the installer download (HTTP 403): the account behind redhat_offline_token has no active Ansible Automation Platform subscription or trial"
+  fi
+  if [ "${HTTP_CODE}" != "200" ]; then
+    die "installer download failed (HTTP ${HTTP_CODE})"
+  fi
+  if ! echo "${CHECKSUM}  ${TARBALL}" | sha256sum -c - >/dev/null; then
+    die "checksum mismatch for ${FILENAME}"
+  fi
 else
   die "no installer source configured: set redhat_offline_token, aap_installer_s3_uri or aap_installer_url"
 fi

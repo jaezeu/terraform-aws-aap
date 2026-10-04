@@ -109,7 +109,7 @@ terraform test          # plans against mocked providers (tests/plan.tftest.hcl)
 ## How the bootstrap works
 
 1. Terraform renders a small **cloud-config** (gzip + base64 user data) containing `install.env` (non-secret settings), an inventory *template*, and the static [install_aap.sh](modules/aap-node/scripts/install_aap.sh).
-2. On first boot the script installs `ansible-core`, `podman`, the AWS CLI and the SSM Agent, waits for the Elastic IP to be attached, sets the hostname and `/etc/hosts`.
+2. On first boot the script installs `ansible-core`, `podman`, the AWS CLI and the SSM Agent, waits for the instance role to become usable (IAM is eventually consistent) and for the Elastic IP to be attached, sets the hostname and `/etc/hosts`.
 3. It reads the secrets from SSM Parameter Store with the instance role and creates the non-root `aap` installation user (passwordless sudo, `loginctl enable-linger`).
 4. It fetches the installer: `aap_installer_s3_uri` > `aap_installer_url` > the Red Hat Customer Portal API (`/management/v1/images/cset/ansible-automation-platform-<ver>-for-rhel-<major>-x86_64-files`, newest `containerized-setup-<ver>-*` build). This is the same lookup the Red Hat CoP [`infra.aap_utilities.aap_setup_download`](https://github.com/redhat-cop/aap_utilities) role performs.
 5. Optionally exports the manifest from your subscription allocation (RHSM API: `export` → `exportJob` → download) and sets `controller_license_file`.
