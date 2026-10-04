@@ -1,0 +1,78 @@
+# Ansible Automation Platform ${aap_version} - containerized growth topology
+# (all components on one node). Skeleton rendered by Terraform; the
+# $${PLACEHOLDER} values are filled in on the instance at boot from AWS SSM
+# Parameter Store, so no secret ever lands in EC2 user data.
+
+[automationgateway]
+${hostname}
+
+[automationcontroller]
+${hostname}
+
+%{ if enable_hub ~}
+[automationhub]
+${hostname}
+
+%{ endif ~}
+%{ if enable_eda ~}
+[automationeda]
+${hostname}
+
+%{ endif ~}
+[database]
+${hostname}
+
+[all:vars]
+ansible_connection=local
+
+# Managed PostgreSQL (runs as a container on this node)
+postgresql_admin_username=postgres
+postgresql_admin_password=$${PG_PASSWORD}
+
+# registry.redhat.io credentials used to pull the AAP container images
+registry_username=$${REGISTRY_USERNAME}
+registry_password=$${REGISTRY_PASSWORD}
+
+# Single node => standalone Redis (cluster mode needs 6 nodes)
+redis_mode=standalone
+
+# Platform gateway
+gateway_admin_password=$${ADMIN_PASSWORD}
+gateway_pg_host=${hostname}
+gateway_pg_password=$${PG_PASSWORD}
+
+# Automation controller
+controller_admin_password=$${ADMIN_PASSWORD}
+controller_pg_host=${hostname}
+controller_pg_password=$${PG_PASSWORD}
+controller_percent_memory_capacity=0.5
+# Subscription manifest (line removed at boot when no manifest is configured)
+controller_license_file=$${LICENSE_FILE}
+
+%{ if enable_hub ~}
+# Private automation hub
+hub_admin_password=$${ADMIN_PASSWORD}
+hub_pg_host=${hostname}
+hub_pg_password=$${PG_PASSWORD}
+hub_seed_collections=${hub_seed_collections}
+
+%{ endif ~}
+%{ if enable_eda ~}
+# Event-Driven Ansible controller
+eda_admin_password=$${ADMIN_PASSWORD}
+eda_pg_host=${hostname}
+eda_pg_password=$${PG_PASSWORD}
+
+%{ endif ~}
+%{ if bundle_install ~}
+# Offline bundle: container images are loaded from the bundle directory
+bundle_install=true
+bundle_dir=$${SETUP_DIR}/bundle
+
+%{ endif ~}
+%{ if length(extra_vars) > 0 ~}
+# Extra variables (var.extra_inventory_vars)
+%{ for k, v in extra_vars ~}
+${k}=${v}
+%{ endfor ~}
+%{ endif ~}
